@@ -1,0 +1,30 @@
+# Dependencias y compilado
+/node_modules
+/dist
+*.tsbuildinfo
+
+# Logs
+logs
+*.log
+pnpm-debug.log*
+
+# Tests
+/coverage
+
+# Variables de entorno
+.env
+.env.*
+!.env.example
+
+# IDE y SO
+/.idea
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+.DS_Store
+
+# graphify
+graphify-out/
+
+# Claude Code (configuración personal)
+.claude/settings.local.json

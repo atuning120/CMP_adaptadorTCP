@@ -1,0 +1,4 @@
+# Scripts de instalación de dependencias nativas. esbuild (usado por tsx y vitest)
+# trae su binario como dependencia opcional, así que su postinstall no hace falta.
+allowBuilds:
+  esbuild: false
