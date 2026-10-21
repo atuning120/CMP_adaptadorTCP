@@ -2,22 +2,35 @@
 
 Servicio intermedio entre las **fuentes de ubicación** de las máquinas y el **Backend** de GeoPlanta.
 
-Recibe posiciones en el formato de cada fuente, las traduce a un formato único y las reenvía al Backend por HTTPS. El adaptador no escribe en la base de datos. El Backend se encarga de asociar cada dispositivo a su máquina, guardar el historial, revisar geocercas y generar alertas.
+Recibe las posiciones de los dispositivos GPS por TCP (protocolo binario GT06, el del Jimi LL301), las traduce a JSON y las reenvía al Backend por HTTPS. El adaptador no escribe en la base de datos. El Backend asocia cada dispositivo a su máquina, guarda el historial y publica las posiciones en tiempo real al panel web por WebSocket.
 
 ## Arquitectura
 
 ```
-Etapa actual:  App móvil ──HTTPS JSON──▶ ┌────────────┐
-                                        │ Adaptador  │ ──HTTPS──▶ Backend ──▶ PostgreSQL + PostGIS
-Etapa futura:  GPS LL301 ──TCP GT06────▶ └────────────┘
+App móvil (hoy)  ─┐                       ┌───────────────────┐  HTTPS + API key   ┌─────────┐  WebSocket  ┌───────────┐
+                  ├── TCP GT06 :5023 ───▶ │ Adaptador         │ ─────────────────▶ │ Backend │ ──────────▶ │ Panel web │
+GPS LL301 (luego) ┘                       │ (cola + reintento)│ POST /tracking/... └────┬────┘  /tracking  │  /mapa    │
+                                          └───────────────────┘                         ▼             └───────────┘
+                                                                              PostgreSQL + PostGIS
 ```
 
 | Etapa | Fuente | Protocolo | Frecuencia |
 |---|---|---|---|
-| Actual (provisoria) | App móvil GeoPlanta, durante un turno activo | HTTPS + JSON | Cada ~2 minutos |
-| Futura | GPS Jimi IoT LL301 instalado en cada máquina | TCP, protocolo binario GT06 (puerto 5023) | Cada 20–30 segundos |
+| Actual (provisoria) | App móvil GeoPlanta, durante un turno activo | TCP, GT06 (se hace pasar por un LL301) | Cada ~2 minutos |
+| Futura | GPS Jimi IoT LL301 instalado en cada máquina | TCP, GT06 | Cada 20–30 segundos |
 
-Mientras no lleguen los GPS, el teléfono del operador actúa como un **GPS virtual** de la máquina que tiene en su turno, con el identificador `APP-<id_maquina>`. Cuando lleguen los LL301 solo cambia este proyecto: se agrega la entrada TCP y se retira la entrada de la app. El contrato con el Backend sigue igual.
+Mientras no lleguen los GPS, el teléfono del operador actúa como un **GPS virtual** de la máquina de su turno: habla GT06 igual que un LL301, con el IMEI `9` + id de la máquina en 14 dígitos (la máquina 12 es `900000000000012`). Cuando lleguen los LL301 se configuran apuntando a este mismo puerto y se quita el envío de la app: el adaptador y el Backend no cambian.
+
+### Protocolo GT06
+
+| Paquete | Código | Qué hace el adaptador |
+|---|---|---|
+| Login | `0x01` | Guarda el IMEI de la conexión y responde ACK |
+| Heartbeat | `0x13`, `0x23` | Guarda la batería (se asocia a las posiciones siguientes) y responde ACK |
+| Ubicación | `0x12`, `0x22`, `0xA0` | Si hay login y fix GPS, encola la posición para el Backend |
+| Alarma | `0x16`, `0x26`, `0x27` | Responde ACK |
+
+Las tramas con CRC inválido se descartan. Si el Backend no responde, las posiciones quedan en una cola en memoria y se reintenta con espera creciente (hasta 60 s).
 
 ## Stack
 
@@ -39,6 +52,17 @@ Mientras no lleguen los GPS, el teléfono del operador actúa como un **GPS virt
 pnpm install
 ```
 
+## Variables de entorno
+
+Para desarrollo local van en el archivo `.env` (`pnpm dev` lo carga). En producción viven en la configuración del contenedor, nunca en la imagen.
+
+| Variable | Obligatoria | Descripción | Por defecto |
+|---|---|---|---|
+| `BACKEND_URL` | Sí | URL del Backend, por ejemplo `http://localhost:3000` | — |
+| `ADAPTADOR_API_KEY` | Sí | Clave compartida con el Backend (su variable `ADAPTADOR_API_KEY`) | — |
+| `PORT` | No | Puerto HTTP (`/health`) | `3001` |
+| `TCP_PORT` | No | Puerto TCP de los dispositivos GT06 | `5023` |
+
 ## Ejecución
 
 ### Modo desarrollo
@@ -47,7 +71,7 @@ pnpm install
 pnpm dev
 ```
 
-El servidor queda en `http://localhost:3001` (o en el puerto definido en `PORT`) y se reinicia solo cada vez que guardas un archivo de `src/`. Para detenerlo, presiona `Ctrl + C`.
+Levanta el servidor HTTP en `http://localhost:3001` y el TCP de los dispositivos en el puerto `5023`, y se reinicia solo cada vez que guardas un archivo de `src/`. Para detenerlo, presiona `Ctrl + C`.
 
 ### Modo producción
 
@@ -58,10 +82,10 @@ pnpm build
 pnpm start
 ```
 
-`pnpm start` no lee el archivo `.env`. Si necesitas otro puerto, pásalo como variable de entorno:
+`pnpm start` no lee el archivo `.env`: las variables se pasan en el entorno:
 
 ```bash
-PORT=8080 pnpm start
+BACKEND_URL=https://mi-backend ADAPTADOR_API_KEY=... pnpm start
 ```
 
 ### Verificar que está funcionando
@@ -72,13 +96,22 @@ Con el servidor corriendo, en otra terminal:
 curl http://localhost:3001/health
 ```
 
-Debe responder:
+Debe responder (`posicionesEnCola` son las que esperan al Backend; si crece y no baja, el Backend no está recibiendo):
 
 ```json
-{ "status": "ok" }
+{ "status": "ok", "posicionesEnCola": 0 }
 ```
 
-También puedes abrir `http://localhost:3001/health` en el navegador.
+### Simular un dispositivo
+
+Para probar el flujo completo sin teléfono ni LL301, con el adaptador y el Backend corriendo:
+
+```bash
+pnpm simular [idMaquina] [intervaloSegundos] [host] [puerto]
+pnpm simular 3 10            # máquina 3, una posición cada 10 s, a localhost:5023
+```
+
+Hace login con el IMEI virtual de la máquina y la mueve en círculo por Mina Los Colorados. La máquina aparece moviéndose en el mapa del panel web. Requiere que la máquina tenga su GPS virtual en la base de datos (migración `010_tracking_gps.sql` del Backend).
 
 ### Antes de hacer commit
 
@@ -97,27 +130,39 @@ pnpm lint && pnpm typecheck && pnpm test
 | `pnpm typecheck` | Verifica los tipos sin compilar |
 | `pnpm test` | Ejecuta los tests una vez |
 | `pnpm test:watch` | Ejecuta los tests en modo watch |
+| `pnpm simular` | Simula un dispositivo GT06 (ver arriba) |
 
 ## Endpoints
 
 | Método | Ruta | Descripción |
 |---|---|---|
-| `GET` | `/health` | Estado del servicio. Responde `{ "status": "ok" }` |
+| `GET` | `/health` | Estado del servicio y posiciones en cola |
+| TCP | `:5023` | Dispositivos GT06 (LL301 o la app móvil) |
 
 ## Estructura
 
 ```
 src/
-├── app.ts        # Crea la app Express sin levantar el servidor (la usan los tests)
-├── app.test.ts   # Tests del endpoint /health
-├── config.ts     # Lee las variables de entorno
-└── main.ts       # Punto de entrada: levanta el servidor HTTP
+├── app.ts                    # App Express (/health) sin levantar el servidor (la usan los tests)
+├── config.ts                 # Lee las variables de entorno
+├── main.ts                   # Punto de entrada: levanta el servidor HTTP y el TCP
+├── gt06/
+│   ├── crc.ts                # CRC-ITU de las tramas
+│   ├── protocolo.ts          # Separa y decodifica tramas, arma los ACK
+│   └── codificador.ts        # Arma tramas como un dispositivo (simulador y tests)
+├── tcp/
+│   └── servidorGt06.ts       # Servidor TCP: login, heartbeat y ubicaciones por conexión
+└── backend/
+    ├── posicion.ts           # Contrato con el Backend (POST /tracking/posiciones)
+    └── colaPosiciones.ts     # Cola en memoria, envío en lotes y reintentos
+scripts/
+└── simular-dispositivo.ts    # pnpm simular
 ```
 
 Los tests van junto al código, con el sufijo `*.test.ts`.
 
 ## Proyectos relacionados
 
-- **Backend**: API NestJS que recibe las posiciones del adaptador y las guarda en `TRACKING_HISTORY`.
-- **Front-mobile**: App Expo que, en la etapa actual, envía la ubicación del operador durante su turno.
-- **Frontend**: Panel web que muestra la ubicación de la flota en el mapa.
+- **Backend**: API NestJS. Recibe las posiciones en `POST /tracking/posiciones` (cabecera `X-Api-Key`), las guarda en `TRACKING_HISTORY` y las publica por WebSocket (Socket.IO, namespace `/tracking`).
+- **Front-mobile**: App Expo que, en la etapa actual, envía la ubicación del teléfono por GT06 cada 2 minutos durante el turno.
+- **Frontend**: Panel web que muestra la flota en el mapa (`/mapa`) y la mueve en tiempo real.
