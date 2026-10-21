@@ -119,6 +119,42 @@ Hace login con el IMEI virtual de la máquina y la mueve en círculo por Mina Lo
 pnpm lint && pnpm typecheck && pnpm test
 ```
 
+## Despliegue en Azure
+
+El adaptador corre en una **máquina virtual** y no en Container Apps como el Backend: los dispositivos necesitan un puerto TCP público fijo, y el entorno Express de Container Apps solo acepta HTTP.
+
+| Recurso | Valor |
+|---|---|
+| VM | `cmp-adaptador-vm` (grupo `CMP_Capstone`, Chile Central), Ubuntu 24.04, tamaño `Standard_B2ats_v2` |
+| Dirección | `cmp-adaptador.chilecentral.cloudapp.azure.com` (IP pública estática) |
+| Puertos abiertos | `5023/TCP` (dispositivos GT06) y `22` (SSH, solo desde tu IP). `/health` (3001) queda solo dentro de la VM |
+| Imagen | `cmpcapstoneacr.azurecr.io/cmp-adaptador:<versión>` |
+| Variables | `/etc/cmp-adaptador.env` en la VM (permisos 600) |
+| Contenedor | `adaptador`, con `--restart unless-stopped` (vuelve solo si la VM se reinicia) |
+
+Publicar una versión nueva (desde tu PC, con `az login` hecho):
+
+```bash
+./scripts/deploy-azure.sh v2
+```
+
+El script construye y sube la imagen, y reemplaza el contenedor en la VM con `az vm run-command` (sin SSH).
+
+Ver los logs en la VM:
+
+```bash
+ssh -i <clave.pem> azureuser@cmp-adaptador.chilecentral.cloudapp.azure.com
+sudo docker logs -f adaptador
+```
+
+Probar desde tu PC sin teléfono:
+
+```bash
+pnpm simular 3 10 cmp-adaptador.chilecentral.cloudapp.azure.com 5023
+```
+
+El puerto 5023 no tiene autenticación, igual que con un GPS real: cualquiera que conozca un IMEI registrado podría enviar posiciones falsas. Para el piloto se acepta. Si llega a ser un problema, se puede limitar el puerto a las IP del operador móvil.
+
 ## Scripts
 
 | Comando | Descripción |
@@ -131,6 +167,7 @@ pnpm lint && pnpm typecheck && pnpm test
 | `pnpm test` | Ejecuta los tests una vez |
 | `pnpm test:watch` | Ejecuta los tests en modo watch |
 | `pnpm simular` | Simula un dispositivo GT06 (ver arriba) |
+| `./scripts/deploy-azure.sh vN` | Publica la versión en la VM de Azure |
 
 ## Endpoints
 
