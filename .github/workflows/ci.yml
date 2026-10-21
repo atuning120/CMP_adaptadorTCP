@@ -1,0 +1,92 @@
+# CI: cada PR hacia main debe pasar calidad (lint, typecheck, tests, build) y seguridad (dependencias y secretos)
+# antes de poder mergearse. Los nombres de los jobs son los checks obligatorios del ruleset de main.
+name: CI Adaptador
+
+on:
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Un push nuevo al mismo PR cancela la verificación anterior
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  calidad:
+    name: Lint, typecheck, tests y build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      # Mismas versiones que el Backend y el Frontend
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+
+      # Con el lockfile exacto: si package.json y pnpm-lock.yaml no coinciden, falla
+      - name: Instalar dependencias
+        run: pnpm install --frozen-lockfile
+
+      # Los .env tienen la configuración de cada entorno y no deben subirse (example.env sí)
+      - name: Sin archivos .env versionados
+        run: |
+          if git ls-files | grep -E '(^|/)\.env($|\.)'; then
+            echo "::error::Hay archivos .env versionados. Quítalos con 'git rm --cached' (están en .gitignore)."
+            exit 1
+          fi
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Tests
+        run: pnpm test
+
+      - name: Build
+        run: pnpm build
+
+  seguridad:
+    name: Seguridad de dependencias y secretos
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # Historial completo: gitleaks revisa también commits anteriores del PR
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 11.9.0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      # Vulnerabilidades altas o críticas en dependencias de producción
+      - name: Auditoría de dependencias
+        run: pnpm audit --prod --audit-level high
+
+      # Dependencias nuevas o actualizadas en el PR con vulnerabilidades altas o licencias problemáticas
+      - name: Revisión de dependencias del PR
+        if: github.event_name == 'pull_request'
+        uses: actions/dependency-review-action@v4
+        with:
+          fail-on-severity: high
+          deny-licenses: AGPL-1.0-only, AGPL-1.0-or-later, AGPL-3.0-only, AGPL-3.0-or-later, GPL-2.0-only, GPL-2.0-or-later, GPL-3.0-only, GPL-3.0-or-later
+
+      # Secretos (claves, tokens, contraseñas) en el código o en el historial. Imagen oficial con versión fija
+      - name: Buscar secretos (gitleaks)
+        run: docker run --rm -v "$GITHUB_WORKSPACE:/repo" ghcr.io/gitleaks/gitleaks:v8.24.3 git /repo --redact --no-banner
