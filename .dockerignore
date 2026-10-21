@@ -1,0 +1,12 @@
+# Nunca copiar secretos ni artefactos locales a la imagen: la configuración llega por variables de entorno
+.env
+.env.*
+node_modules
+dist
+coverage
+graphify-out
+scripts
+.git
+.github
+.claude
+*.log
