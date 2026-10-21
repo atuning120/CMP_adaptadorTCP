@@ -2,15 +2,17 @@
 
 Express 5 · TypeScript (ESM, `nodenext`) · Vitest + supertest · oxlint · pnpm (never npm)
 
-Gateway between location sources and the Backend: it receives positions, normalizes them to one contract and forwards them to the Backend over HTTPS. It never writes to the database; the Backend resolves IMEI → machine (`ASIGNACION_GPS`), geofences and alerts.
+Gateway between GPS devices and the Backend: a raw TCP server (Node `net`, port 5023) speaks the binary GT06 protocol, and a queue forwards positions in batches to the Backend (`POST /tracking/posiciones`, header `X-Api-Key`). It never writes to the database; the Backend resolves IMEI → machine (`ASIGNACION_GPS`) and pushes positions to the web panel over Socket.IO.
 
-- Interim source: the mobile app (Front-mobile) posts its location every ~2 min during an active shift, as a virtual GPS `imei = 'APP-<id_maquina>'`.
-- Future source: Jimi LL301 trackers over raw TCP, GT06 protocol (port 5023). Use Node's `net` module, not NestJS/Express transports; every login/heartbeat/position packet needs an ACK.
-- When the LL301 arrive, only this project changes: add the TCP input and drop the app input. The contract towards the Backend stays the same.
+- Sources: today the mobile app (Front-mobile `src/services/gt06.ts`) impersonates an LL301 every ~2 min during a shift with virtual IMEI `'9' + id_maquina` padded to 15 digits; later the real Jimi LL301 trackers connect to the same port. Nothing here changes when they arrive.
+- GT06 ACKs: login, heartbeat and alarms get one (`ack()`); locations don't. Battery comes from the last heartbeat of the connection.
+- `src/gt06/codificador.ts` must stay in sync with Front-mobile's `src/services/gt06.ts`. `pnpm simular` drives a fake device for end-to-end tests.
+- Env vars: `BACKEND_URL`, `ADAPTADOR_API_KEY` (required), `PORT`, `TCP_PORT`.
 
 ## Code
 
-- `src/app.ts`: `createApp()` builds the Express app without listening (tests use it with supertest); `src/main.ts` starts the server; `src/config.ts` reads env vars.
+- `src/app.ts`: `createApp()` builds the Express app (`/health`) without listening; `src/main.ts` starts HTTP + TCP; `src/config.ts` reads env vars (`leerConfig()`, only called from main).
+- `src/gt06/` protocol (framing, CRC, decode, ACK), `src/tcp/` connection handling, `src/backend/` contract + queue.
 - ESM imports need the `.js` extension (`import { x } from './x.js'`).
 - Tests live next to the code as `*.test.ts`.
 - Before finishing: `pnpm lint`, `pnpm typecheck` and `pnpm test`.

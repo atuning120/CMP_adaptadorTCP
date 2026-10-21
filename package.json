@@ -12,10 +12,11 @@
     "dev": "tsx watch --env-file-if-exists=.env src/main.ts",
     "build": "tsc",
     "start": "node dist/main.js",
-    "lint": "oxlint src/",
+    "lint": "oxlint src/ scripts/",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "simular": "tsx scripts/simular-dispositivo.ts"
   },
   "devEngines": {
     "packageManager": {
