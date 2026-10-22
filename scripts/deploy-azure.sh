@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Publica una nueva versión del adaptador en la VM de Azure.
+# Publica una nueva versión del adaptador en la VM de Azure desde tu PC. El camino normal es el pipeline
+# (merge a main); esto queda como respaldo manual.
 # Uso: ./scripts/deploy-azure.sh v2
 #
 # El adaptador corre en una VM (no en Container Apps Express) porque necesita un puerto TCP público para los
@@ -19,16 +20,13 @@ az acr login -n "$REGISTRO" >/dev/null
 docker buildx build --platform linux/amd64 --provenance=false --sbom=false \
   -t "$IMAGEN:$VERSION" -t "$IMAGEN:latest" --push .
 
-# Se ejecuta dentro de la VM como root, sin SSH. Los dispositivos se reconectan solos al contenedor nuevo
-az vm run-command invoke -g "$GRUPO" -n "$VM" --command-id RunShellScript --query "value[0].message" -o tsv --scripts "
-set -e
-docker pull $IMAGEN:$VERSION
-docker rm -f adaptador 2>/dev/null || true
-docker run -d --name adaptador --restart unless-stopped --env-file /etc/cmp-adaptador.env \
-  -p 5023:5023 -p 127.0.0.1:3001:3001 $IMAGEN:$VERSION
-sleep 3
-curl -fsS http://127.0.0.1:3001/health
-docker image prune -f >/dev/null
-"
+# Se ejecuta dentro de la VM como root, sin SSH. run-command termina bien aunque el script falle
+SCRIPT=$(mktemp)
+trap 'rm -f "$SCRIPT"' EXIT
+{ echo "NUEVA=$IMAGEN:$VERSION"; cat scripts/actualizar-vm.sh; } > "$SCRIPT"
+SALIDA=$(az vm run-command invoke -g "$GRUPO" -n "$VM" --command-id RunShellScript \
+  --scripts "@$SCRIPT" --query "value[0].message" -o tsv)
+echo "$SALIDA"
+grep -q DESPLIEGUE_OK <<< "$SALIDA" || { echo "El despliegue falló" >&2; exit 1; }
 
 echo "Desplegado $VERSION"

@@ -1,19 +1,22 @@
 # CI: cada PR hacia main debe pasar calidad (lint, typecheck, tests, build) y seguridad (dependencias y secretos)
 # antes de poder mergearse. Los nombres de los jobs son los checks obligatorios del ruleset de main.
+# CD: cada push a main (merge del PR) vuelve a verificar y despliega en la VM de Azure.
 name: CI Adaptador
 
 on:
   pull_request:
+    branches: [main]
+  push:
     branches: [main]
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Un push nuevo al mismo PR cancela la verificación anterior
+# Un push nuevo al mismo PR cancela la verificación anterior; en main nunca se corta (despliegues en orden)
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 jobs:
   calidad:
@@ -90,3 +93,63 @@ jobs:
       # Secretos (claves, tokens, contraseñas) en el código o en el historial. Imagen oficial con versión fija
       - name: Buscar secretos (gitleaks)
         run: docker run --rm -v "$GITHUB_WORKSPACE:/repo" ghcr.io/gitleaks/gitleaks:v8.24.3 git /repo --redact --no-banner
+
+  desplegar:
+    name: Desplegar en Azure
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [calidad, seguridad]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    # El environment limita qué workflows pueden autenticarse en Azure (credencial federada OIDC)
+    environment:
+      name: produccion
+    permissions:
+      contents: read
+      id-token: write
+    env:
+      REGISTRO: cmpcapstoneacr
+      IMAGEN: cmpcapstoneacr.azurecr.io/cmp-adaptador
+      GRUPO: CMP_Capstone
+      VM: cmp-adaptador-vm
+    steps:
+      - uses: actions/checkout@v4
+
+      # Sin contraseñas guardadas: GitHub entrega un token OIDC que Azure canjea por la identidad del pipeline
+      - name: Login en Azure
+        uses: azure/login@v2
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+
+      - name: Login en ACR
+        run: az acr login -n "$REGISTRO"
+
+      - uses: docker/setup-buildx-action@v3
+
+      - name: Construir y publicar imagen
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          platforms: linux/amd64
+          provenance: false
+          sbom: false
+          push: true
+          tags: |
+            ${{ env.IMAGEN }}:${{ github.sha }}
+            ${{ env.IMAGEN }}:latest
+
+      # Se ejecuta dentro de la VM como root, sin SSH (ver scripts/actualizar-vm.sh). run-command termina bien
+      # aunque el script falle: el despliegue solo cuenta si la salida trae DESPLIEGUE_OK
+      - name: Reemplazar contenedor en la VM
+        run: |
+          SCRIPT="$RUNNER_TEMP/actualizar-vm.sh"
+          { echo "NUEVA=$IMAGEN:$GITHUB_SHA"; cat scripts/actualizar-vm.sh; } > "$SCRIPT"
+          SALIDA=$(az vm run-command invoke -g "$GRUPO" -n "$VM" --command-id RunShellScript \
+            --scripts "@$SCRIPT" --query "value[0].message" -o tsv)
+          echo "$SALIDA"
+          if ! grep -q DESPLIEGUE_OK <<< "$SALIDA"; then
+            echo "::error::El despliegue en la VM falló (ver la salida arriba)"
+            exit 1
+          fi
+          echo "Desplegado ${GITHUB_SHA::7} en $VM" >> "$GITHUB_STEP_SUMMARY"

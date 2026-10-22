@@ -16,7 +16,8 @@ Gateway between GPS devices and the Backend: a raw TCP server (Node `net`, port 
 - ESM imports need the `.js` extension (`import { x } from './x.js'`).
 - Tests live next to the code as `*.test.ts`.
 - Before finishing: `pnpm lint`, `pnpm typecheck` and `pnpm test`.
-- Local env vars go in `.env` (loaded by `pnpm dev`); in Azure they live in the Container App, never in the image.
+- Local env vars go in `.env` (loaded by `pnpm dev`); in Azure they live in `/etc/cmp-adaptador.env` on the VM, never in the image.
+- Deploy: merging to `main` runs the `desplegar` job in `.github/workflows/ci.yml` (OIDC → ACR → `az vm run-command` with `scripts/actualizar-vm.sh`, which rolls back if `/health` fails). `scripts/deploy-azure.sh vN` is only a manual fallback.
 
 ## graphify
 

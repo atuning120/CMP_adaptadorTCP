@@ -132,13 +132,26 @@ El adaptador corre en una **máquina virtual** y no en Container Apps como el Ba
 | Variables | `/etc/cmp-adaptador.env` en la VM (permisos 600) |
 | Contenedor | `adaptador`, con `--restart unless-stopped` (vuelve solo si la VM se reinicia) |
 
-Publicar una versión nueva (desde tu PC, con `az login` hecho):
+### Despliegue automático (CI/CD)
+
+Al mergear un PR a `main`, el job **Desplegar en Azure** de `.github/workflows/ci.yml` vuelve a pasar calidad y seguridad, construye la imagen (`cmp-adaptador:<sha del commit>` y `latest`), la sube al ACR y reemplaza el contenedor en la VM con `az vm run-command` (sin SSH), usando `scripts/actualizar-vm.sh`. Si el contenedor nuevo no responde `/health`, ese script vuelve a levantar la imagen anterior y el job falla.
+
+Se autentica en Azure por OIDC, sin contraseñas guardadas:
+
+| Dónde | Qué |
+|---|---|
+| Entra ID | App registration con federated credential, subject `repo:atuning120@90119017/CMP_adaptadorTCP@1428338524:environment:produccion`, rol Contributor sobre `CMP_Capstone` |
+| GitHub | Environment `produccion` (solo `main`) y variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
+
+### Despliegue manual (respaldo)
+
+Si el pipeline no está disponible, desde tu PC con `az login` hecho:
 
 ```bash
 ./scripts/deploy-azure.sh v2
 ```
 
-El script construye y sube la imagen, y reemplaza el contenedor en la VM con `az vm run-command` (sin SSH).
+Hace lo mismo que el pipeline, con la versión que le indiques como tag.
 
 Ver los logs en la VM:
 
@@ -167,7 +180,7 @@ El puerto 5023 no tiene autenticación, igual que con un GPS real: cualquiera qu
 | `pnpm test` | Ejecuta los tests una vez |
 | `pnpm test:watch` | Ejecuta los tests en modo watch |
 | `pnpm simular` | Simula un dispositivo GT06 (ver arriba) |
-| `./scripts/deploy-azure.sh vN` | Publica la versión en la VM de Azure |
+| `./scripts/deploy-azure.sh vN` | Publica la versión en la VM de Azure a mano (el camino normal es el merge a `main`) |
 
 ## Endpoints
 
