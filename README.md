@@ -16,7 +16,7 @@ GPS LL301 (luego) ┘                       │ (cola + reintento)│ POST /trac
 
 | Etapa | Fuente | Protocolo | Frecuencia |
 |---|---|---|---|
-| Actual (provisoria) | App móvil GeoPlanta, durante un turno activo | TCP, GT06 (se hace pasar por un LL301) | Cada ~2 minutos |
+| Actual (provisoria) | App móvil GeoPlanta, durante un turno activo | TCP, GT06 (se hace pasar por un LL301) | Cada ~30 segundos |
 | Futura | GPS Jimi IoT LL301 instalado en cada máquina | TCP, GT06 | Cada 20–30 segundos |
 
 Mientras no lleguen los GPS, el teléfono del operador actúa como un **GPS virtual** de la máquina de su turno: habla GT06 igual que un LL301, con el IMEI `9` + id de la máquina en 14 dígitos (la máquina 12 es `900000000000012`). Cuando lleguen los LL301 se configuran apuntando a este mismo puerto y se quita el envío de la app: el adaptador y el Backend no cambian.
@@ -201,5 +201,5 @@ Los tests van junto al código, con el sufijo `*.test.ts`.
 ## Proyectos relacionados
 
 - **Backend**: API NestJS. Recibe las posiciones en `POST /tracking/posiciones` (cabecera `X-Api-Key`), las guarda en `TRACKING_HISTORY` y las publica por WebSocket (Socket.IO, namespace `/tracking`).
-- **Front-mobile**: App Expo que, en la etapa actual, envía la ubicación del teléfono por GT06 cada 2 minutos durante el turno.
+- **Front-mobile**: App Expo que, en la etapa actual, envía la ubicación del teléfono por GT06 cada 30 segundos durante el turno.
 - **Frontend**: Panel web que muestra la flota en el mapa (`/mapa`) y la mueve en tiempo real.
