@@ -16,7 +16,7 @@ GPS LL301 (luego) ┘                       │ (cola + reintento)│ POST /trac
 
 | Etapa | Fuente | Protocolo | Frecuencia |
 |---|---|---|---|
-| Actual (provisoria) | App móvil GeoPlanta, durante un turno activo | TCP, GT06 (se hace pasar por un LL301) | Cada ~2 minutos |
+| Actual (provisoria) | App móvil GeoPlanta, durante un turno activo | TCP, GT06 (se hace pasar por un LL301) | Cada ~30 segundos |
 | Futura | GPS Jimi IoT LL301 instalado en cada máquina | TCP, GT06 | Cada 20–30 segundos |
 
 Mientras no lleguen los GPS, el teléfono del operador actúa como un **GPS virtual** de la máquina de su turno: habla GT06 igual que un LL301, con el IMEI `9` + id de la máquina en 14 dígitos (la máquina 12 es `900000000000012`). Cuando lleguen los LL301 se configuran apuntando a este mismo puerto y se quita el envío de la app: el adaptador y el Backend no cambian.
@@ -132,13 +132,26 @@ El adaptador corre en una **máquina virtual** y no en Container Apps como el Ba
 | Variables | `/etc/cmp-adaptador.env` en la VM (permisos 600) |
 | Contenedor | `adaptador`, con `--restart unless-stopped` (vuelve solo si la VM se reinicia) |
 
-Publicar una versión nueva (desde tu PC, con `az login` hecho):
+### Despliegue automático (CI/CD)
+
+Al mergear un PR a `main`, el job **Desplegar en Azure** de `.github/workflows/ci.yml` vuelve a pasar calidad y seguridad, construye la imagen (`cmp-adaptador:<sha del commit>` y `latest`), la sube al ACR y reemplaza el contenedor en la VM con `az vm run-command` (sin SSH), usando `scripts/actualizar-vm.sh`. Si el contenedor nuevo no responde `/health`, ese script vuelve a levantar la imagen anterior y el job falla.
+
+Se autentica en Azure por OIDC, sin contraseñas guardadas:
+
+| Dónde | Qué |
+|---|---|
+| Entra ID | App registration con federated credential, subject `repo:atuning120@90119017/CMP_adaptadorTCP@1428338524:environment:produccion`, rol Contributor sobre `CMP_Capstone` |
+| GitHub | Environment `produccion` (solo `main`) y variables `AZURE_CLIENT_ID`, `AZURE_TENANT_ID`, `AZURE_SUBSCRIPTION_ID` |
+
+### Despliegue manual (respaldo)
+
+Si el pipeline no está disponible, desde tu PC con `az login` hecho:
 
 ```bash
 ./scripts/deploy-azure.sh v2
 ```
 
-El script construye y sube la imagen, y reemplaza el contenedor en la VM con `az vm run-command` (sin SSH).
+Hace lo mismo que el pipeline, con la versión que le indiques como tag.
 
 Ver los logs en la VM:
 
@@ -167,7 +180,7 @@ El puerto 5023 no tiene autenticación, igual que con un GPS real: cualquiera qu
 | `pnpm test` | Ejecuta los tests una vez |
 | `pnpm test:watch` | Ejecuta los tests en modo watch |
 | `pnpm simular` | Simula un dispositivo GT06 (ver arriba) |
-| `./scripts/deploy-azure.sh vN` | Publica la versión en la VM de Azure |
+| `./scripts/deploy-azure.sh vN` | Publica la versión en la VM de Azure a mano (el camino normal es el merge a `main`) |
 
 ## Endpoints
 
@@ -201,5 +214,5 @@ Los tests van junto al código, con el sufijo `*.test.ts`.
 ## Proyectos relacionados
 
 - **Backend**: API NestJS. Recibe las posiciones en `POST /tracking/posiciones` (cabecera `X-Api-Key`), las guarda en `TRACKING_HISTORY` y las publica por WebSocket (Socket.IO, namespace `/tracking`).
-- **Front-mobile**: App Expo que, en la etapa actual, envía la ubicación del teléfono por GT06 cada 2 minutos durante el turno.
+- **Front-mobile**: App Expo que, en la etapa actual, envía la ubicación del teléfono por GT06 cada 30 segundos durante el turno.
 - **Frontend**: Panel web que muestra la flota en el mapa (`/mapa`) y la mueve en tiempo real.
