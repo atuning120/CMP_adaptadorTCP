@@ -1,10 +1,11 @@
-#!/usr/bin/env bash
+#!/bin/sh
 # Reemplaza el contenedor del adaptador dentro de la VM. No se ejecuta a mano: lo envían con az vm run-command
 # el pipeline (.github/workflows/ci.yml) y scripts/deploy-azure.sh, anteponiendo la línea NUEVA=<imagen:tag>.
 # La VM ya tiene Docker, el login al ACR y /etc/cmp-adaptador.env con las variables.
 # Si el contenedor nuevo no responde /health vuelve a levantar la imagen anterior. run-command termina bien
 # aunque el script falle, así que quien lo envía revisa que la salida traiga DESPLIEGUE_OK.
-set -euo pipefail
+# POSIX sh y no bash: run-command lo ejecuta con sh (dash en Ubuntu) e ignora el shebang.
+set -eu
 
 : "${NUEVA:?Falta NUEVA (imagen a desplegar)}"
 ANTERIOR=$(docker inspect -f '{{.Config.Image}}' adaptador 2>/dev/null || true)
