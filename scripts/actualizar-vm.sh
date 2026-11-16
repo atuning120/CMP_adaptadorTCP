@@ -12,8 +12,10 @@ ANTERIOR=$(docker inspect -f '{{.Config.Image}}' adaptador 2>/dev/null || true)
 
 levantar() {
   docker rm -f adaptador 2>/dev/null || true
-  # Los dispositivos se reconectan solos al contenedor nuevo
+  # Los dispositivos se reconectan solos al contenedor nuevo. Logs rotados (3 × 10 MB): sin límite, json-file crece
+  # para siempre en el disco de la VM
   docker run -d --name adaptador --restart unless-stopped --env-file /etc/cmp-adaptador.env \
+    --log-opt max-size=10m --log-opt max-file=3 \
     -p 5023:5023 -p 127.0.0.1:3001:3001 "$1"
 }
 

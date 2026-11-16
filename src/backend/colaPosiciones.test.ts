@@ -70,3 +70,66 @@ describe('ColaPosiciones', () => {
     expect(log.error).toHaveBeenCalled();
   });
 });
+
+describe('ColaPosiciones: estado para /health', () => {
+  const T0 = new Date('2026-11-16T12:00:00.000Z');
+  const conReloj = (fetch: typeof globalThis.fetch, opciones: { maximoEnCola?: number } = {}) =>
+    new ColaPosiciones({ backendUrl: 'http://backend', apiKey: 'clave', fetch, tamanoLote: 2, log, ahora: () => T0, ...opciones });
+
+  it('parte en cero', () => {
+    expect(conReloj(vi.fn()).estado()).toEqual({
+      posicionesEnCola: 0,
+      enviadas: 0,
+      descartadas: 0,
+      ultimoEnvioOk: null,
+      ultimoError: null,
+      reintentando: false,
+    });
+  });
+
+  it('cuenta las enviadas y la hora del último envío exitoso', async () => {
+    const cola = conReloj(vi.fn(async () => new Response(null, { status: 200 })));
+    for (const imei of ['1', '2', '3']) cola.encolar(posicion(imei));
+    await cola.enviar();
+
+    expect(cola.estado()).toMatchObject({ posicionesEnCola: 0, enviadas: 3, descartadas: 0, ultimoEnvioOk: T0.toISOString() });
+  });
+
+  it('con el Backend caído muestra la cola, el error y que está reintentando', async () => {
+    vi.useFakeTimers();
+    const cola = conReloj(vi.fn<typeof globalThis.fetch>().mockResolvedValue(new Response(null, { status: 503 })));
+    cola.encolar(posicion('1'));
+    await vi.waitFor(() => expect(cola.estado().reintentando).toBe(true));
+
+    expect(cola.estado()).toMatchObject({
+      posicionesEnCola: 1,
+      enviadas: 0,
+      ultimoEnvioOk: null,
+      ultimoError: { fecha: T0.toISOString(), detalle: 'El Backend respondió 503' },
+    });
+    cola.detener();
+  });
+
+  it('cuenta como descartadas las rechazadas con 4xx (p. ej. API key incorrecta) con el motivo', async () => {
+    const cola = conReloj(vi.fn(async () => new Response('API key inválida', { status: 401 })));
+    cola.encolar(posicion('1'));
+    cola.encolar(posicion('2'));
+    await cola.enviar();
+
+    // encolar envía de inmediato: van en dos lotes de 1 y el último error es del segundo
+    expect(cola.estado()).toMatchObject({
+      descartadas: 2,
+      enviadas: 0,
+      ultimoError: { detalle: 'El Backend rechazó 1 posiciones (401): API key inválida' },
+    });
+  });
+
+  it('cuenta como descartadas las que saca la cola llena', () => {
+    vi.useFakeTimers();
+    // El primer envío queda colgado: las siguientes se acumulan
+    const cola = conReloj(vi.fn(() => new Promise<Response>(() => undefined)), { maximoEnCola: 2 });
+    for (const imei of ['1', '2', '3', '4']) cola.encolar(posicion(imei));
+
+    expect(cola.estado()).toMatchObject({ posicionesEnCola: 2, descartadas: 2 });
+  });
+});

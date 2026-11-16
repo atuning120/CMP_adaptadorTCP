@@ -1,6 +1,7 @@
 import { createApp } from './app.js';
 import { ColaPosiciones } from './backend/colaPosiciones.js';
 import { leerConfig } from './config.js';
+import { DispositivosVistos } from './tcp/dispositivosVistos.js';
 import { crearServidorGt06 } from './tcp/servidorGt06.js';
 
 // Al detenerse (un despliegue nuevo) se espera este máximo a que la cola termine de enviarse al Backend
@@ -8,12 +9,13 @@ const ESPERA_CIERRE_MS = 8_000;
 
 const config = leerConfig();
 const cola = new ColaPosiciones({ backendUrl: config.backendUrl, apiKey: config.apiKey });
+const dispositivos = new DispositivosVistos();
 
-const http = createApp({ cola }).listen(config.port, () => {
+const http = createApp({ cola, dispositivos, inicio: new Date() }).listen(config.port, () => {
   console.log(`Adaptador: HTTP en el puerto ${config.port}`);
 });
 
-const tcp = crearServidorGt06({ alRecibir: (posicion) => cola.encolar(posicion) }).listen(config.tcpPort, () => {
+const tcp = crearServidorGt06({ alRecibir: (posicion) => cola.encolar(posicion), dispositivos }).listen(config.tcpPort, () => {
   console.log(`Adaptador: GT06 (TCP) en el puerto ${config.tcpPort}, reenviando a ${config.backendUrl}`);
 });
 

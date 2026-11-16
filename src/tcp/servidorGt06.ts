@@ -1,6 +1,7 @@
 import net from 'node:net';
 import type { PosicionGps } from '../backend/posicion.js';
 import { ack, decodificar, extraerTramas, requiereAck } from '../gt06/protocolo.js';
+import type { DispositivosVistos } from './dispositivosVistos.js';
 
 // Sin datos en este tiempo la conexión se cierra (el LL301 manda heartbeat cada pocos minutos)
 const INACTIVIDAD_MS = 10 * 60 * 1000;
@@ -10,13 +11,15 @@ const MAXIMO_BUFFER = 64 * 1024;
 export interface OpcionesServidor {
   alRecibir: (posicion: PosicionGps) => void;
   log?: Pick<Console, 'info' | 'warn'>;
+  // Para el diagnóstico de /health
+  dispositivos?: DispositivosVistos;
 }
 
 /**
  * Servidor TCP que recibe a los dispositivos GT06 (LL301 o la app móvil haciéndose pasar por uno). Cada
  * conexión parte con un login que trae el IMEI; las ubicaciones posteriores se asocian a ese IMEI.
  */
-export function crearServidorGt06({ alRecibir, log = console }: OpcionesServidor): net.Server {
+export function crearServidorGt06({ alRecibir, log = console, dispositivos }: OpcionesServidor): net.Server {
   return net.createServer((socket) => {
     const origen = `${socket.remoteAddress}:${socket.remotePort}`;
     let imei: string | null = null;
@@ -26,6 +29,9 @@ export function crearServidorGt06({ alRecibir, log = console }: OpcionesServidor
     socket.setTimeout(INACTIVIDAD_MS);
     socket.on('timeout', () => socket.destroy());
     socket.on('error', (error) => log.warn(`Conexión ${origen} (${imei ?? 'sin login'}): ${error.message}`));
+    socket.on('close', () => {
+      if (imei) dispositivos?.desconexion(imei);
+    });
 
     socket.on('data', (datos: Buffer) => {
       buffer = Buffer.concat([buffer, datos]);
@@ -41,6 +47,9 @@ export function crearServidorGt06({ alRecibir, log = console }: OpcionesServidor
       for (const trama of tramas) {
         const mensaje = decodificar(trama);
         if (mensaje.tipo === 'login') {
+          // Un segundo login en la misma conexión (otro IMEI) cierra el registro del anterior
+          if (imei && imei !== mensaje.imei) dispositivos?.desconexion(imei);
+          if (imei !== mensaje.imei) dispositivos?.login(mensaje.imei);
           imei = mensaje.imei;
           log.info(`Login ${imei} desde ${origen}`);
         } else if (mensaje.tipo === 'heartbeat') {
@@ -49,6 +58,7 @@ export function crearServidorGt06({ alRecibir, log = console }: OpcionesServidor
           const { ubicacion } = mensaje;
           // Sin login no se sabe de qué máquina es; sin fix GPS la posición no sirve
           if (imei && ubicacion.posicionada) {
+            dispositivos?.ubicacion(imei, bateria);
             alRecibir({
               imei,
               fechaHora: ubicacion.fechaHora.toISOString(),
