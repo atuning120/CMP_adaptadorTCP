@@ -11,6 +11,7 @@ Gateway between GPS devices and the Backend: a raw TCP server (Node `net`, port 
 
 ## Code
 
+- `/health` always answers 200 while the process lives (`actualizar-vm.sh` rolls back on failure, and a down Backend must not trigger that); its body is the diagnosis: `cola` (`ColaPosiciones.estado()`: queued, sent, discarded, last OK send, last error, retrying) and `dispositivos` (`DispositivosVistos`: last seen per IMEI; the app opens one connection per batch, so "connected now" is useless). HTTP listens only on the VM's 127.0.0.1: read it with `az vm run-command invoke ... --scripts 'curl -s http://127.0.0.1:3001/health'`. No source IPs stored.
 - `src/app.ts`: `createApp()` builds the Express app (`/health`) without listening; `src/main.ts` starts HTTP + TCP; `src/config.ts` reads env vars (`leerConfig()`, only called from main).
 - `src/gt06/` protocol (framing, CRC, decode, ACK), `src/tcp/` connection handling, `src/backend/` contract + queue.
 - ESM imports need the `.js` extension (`import { x } from './x.js'`).

@@ -2,6 +2,7 @@ import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PosicionGps } from '../backend/posicion.js';
+import { DispositivosVistos } from './dispositivosVistos.js';
 import { crearServidorGt06 } from './servidorGt06.js';
 
 const hex = (texto: string) => Buffer.from(texto.replace(/\s/g, ''), 'hex');
@@ -14,8 +15,8 @@ const UBICACION = hex('78 78 1F 12 0B 08 1D 11 2E 10 CF 02 7A C7 EB 0C 46 58 49 
 const log = { info: vi.fn(), warn: vi.fn() };
 let servidor: net.Server | null = null;
 
-async function levantar(alRecibir: (p: PosicionGps) => void) {
-  servidor = crearServidorGt06({ alRecibir, log });
+async function levantar(alRecibir: (p: PosicionGps) => void, dispositivos?: DispositivosVistos) {
+  servidor = crearServidorGt06({ alRecibir, log, dispositivos });
   await new Promise<void>((resolve) => servidor!.listen(0, resolve));
   const { port } = servidor.address() as AddressInfo;
   const cliente = net.connect(port);
@@ -42,6 +43,19 @@ describe('servidor GT06', () => {
     await vi.waitFor(() => expect(recibidas).toHaveLength(1));
     expect(recibidas[0]).toMatchObject({ imei: '123456789012345', fechaHora: '2011-08-29T17:46:16.000Z', enTiempoReal: true });
     cliente.destroy();
+  });
+
+  it('registra el dispositivo para /health y lo marca desconectado al cerrar', async () => {
+    const dispositivos = new DispositivosVistos();
+    const recibidas: PosicionGps[] = [];
+    const cliente = await levantar((p) => recibidas.push(p), dispositivos);
+    cliente.write(Buffer.concat([LOGIN, UBICACION]));
+    await vi.waitFor(() => expect(recibidas).toHaveLength(1));
+
+    expect(dispositivos.lista()).toEqual([expect.objectContaining({ imei: '123456789012345', ubicaciones: 1, conectado: true })]);
+
+    cliente.end();
+    await vi.waitFor(() => expect(dispositivos.lista()[0].conectado).toBe(false));
   });
 
   it('ignora ubicaciones antes del login', async () => {
