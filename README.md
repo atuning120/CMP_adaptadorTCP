@@ -25,10 +25,14 @@ Mientras no lleguen los GPS, el teléfono del operador actúa como un **GPS virt
 
 | Paquete | Código | Qué hace el adaptador |
 |---|---|---|
-| Login | `0x01` | Guarda el IMEI de la conexión y responde ACK |
-| Heartbeat | `0x13`, `0x23` | Guarda la batería (se asocia a las posiciones siguientes) y responde ACK |
+| Login | `0x01` | Guarda el IMEI de la conexión y responde ACK. Los equipos 4G traen además su zona horaria (se ve en el log) |
+| Heartbeat | `0x13`, `0x23` | Guarda la batería (se asocia a las posiciones siguientes) y responde ACK. En `0x23` la estima desde el voltaje (3,6 V = 0 %, 4,2 V = 100 %) |
 | Ubicación | `0x12`, `0x22`, `0xA0` | Si hay login y fix GPS, encola la posición para el Backend |
-| Alarma | `0x16`, `0x26`, `0x27` | Responde ACK |
+| Alarma | `0x16`, `0x26`, `0x27` | Responde ACK y encola su posición como una ubicación más (el código de alarma queda en el log) |
+| Solicitud de hora | `0x8A` | Responde la hora UTC del servidor |
+| Otros (`0x94` información, `0x15`/`0x21` respuestas a comandos…) | | Quedan en el log y no cierran la conexión |
+
+Las tramas cortas (`78 78`, largo de 1 byte) y largas (`79 79`, largo de 2 bytes) se aceptan igual. La fecha de las tramas debe venir en UTC: si una posición en tiempo real difiere más de 10 minutos de la hora del servidor, el log lo advierte (suele ser la zona horaria del equipo, comando `GMT`).
 
 Las tramas con CRC inválido se descartan. Si el Backend no responde, las posiciones quedan en una cola en memoria y se reintenta con espera creciente (hasta 60 s).
 
@@ -62,6 +66,7 @@ Para desarrollo local van en el archivo `.env` (`pnpm dev` lo carga). En producc
 | `ADAPTADOR_API_KEY` | Sí | Clave compartida con el Backend (su variable `ADAPTADOR_API_KEY`) | — |
 | `PORT` | No | Puerto HTTP (`/health`) | `3001` |
 | `TCP_PORT` | No | Puerto TCP de los dispositivos GT06 | `5023` |
+| `LOG_TRAMAS` | No | Tramas GT06 en hex en el log: `reales` (GPS reales y conexiones sin login), `todas` (también la app móvil) o `no` | `reales` |
 
 ## Ejecución
 
@@ -153,12 +158,23 @@ Si el pipeline no está disponible, desde tu PC con `az login` hecho:
 
 Hace lo mismo que el pipeline, con la versión que le indiques como tag.
 
-Ver los logs en la VM:
+Ver los logs en la VM (`-t` agrega la hora de cada línea, necesaria para medir intervalos):
 
 ```bash
 ssh -i <clave.pem> azureuser@cmp-adaptador.chilecentral.cloudapp.azure.com
-sudo docker logs -f adaptador
+sudo docker logs -ft adaptador 2>&1 | grep -v 'Login 9'   # sin la app móvil
+sudo tcpdump -i eth0 -nn -X 'tcp port 5023'              # el tráfico crudo
 ```
+
+Con `LOG_TRAMAS=reales` cada trama de un GPS real queda en una línea con el IMEI, lo decodificado y el hex:
+
+```
+RX 864032050668829 0x23 heartbeat 4G #2 batería 70%, 4.02 V, GSM 4/4 | 78780b2344…0d0a
+TX 864032050668829 0x23 heartbeat 4G #2 | 7878052300025dc40d0a
+Desconexión 864032050668829: la cerró el servidor: 10 min 0 s sin datos; duró 2 h 5 min, 412 tramas, última trama hace 10 min 0 s (0x23 heartbeat 4G)
+```
+
+La línea `Desconexión` dice quién cortó: el equipo, el servidor (10 minutos sin datos) o un error de red.
 
 Probar desde tu PC sin teléfono:
 
@@ -201,7 +217,9 @@ src/
 │   ├── protocolo.ts          # Separa y decodifica tramas, arma los ACK
 │   └── codificador.ts        # Arma tramas como un dispositivo (simulador y tests)
 ├── tcp/
-│   └── servidorGt06.ts       # Servidor TCP: login, heartbeat y ubicaciones por conexión
+│   ├── servidorGt06.ts       # Servidor TCP: login, heartbeat y ubicaciones por conexión
+│   ├── registroTramas.ts     # Log de tramas en hex (LOG_TRAMAS)
+│   └── dispositivosVistos.ts # Últimos dispositivos vistos (/health)
 └── backend/
     ├── posicion.ts           # Contrato con el Backend (POST /tracking/posiciones)
     └── colaPosiciones.ts     # Cola en memoria, envío en lotes y reintentos
