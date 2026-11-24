@@ -28,9 +28,9 @@ Mientras no lleguen los GPS, el teléfono del operador actúa como un **GPS virt
 | Login | `0x01` | Guarda el IMEI de la conexión y responde ACK. Los equipos 4G traen además su zona horaria (se ve en el log) |
 | Heartbeat | `0x13`, `0x23` | Guarda la batería (se asocia a las posiciones siguientes) y responde ACK. En `0x23` la estima desde el voltaje (3,6 V = 0 %, 4,2 V = 100 %) |
 | Ubicación | `0x12`, `0x22`, `0xA0` | Si hay login y fix GPS, encola la posición para el Backend |
-| Alarma | `0x16`, `0x26`, `0x27` | Responde ACK y encola su posición como una ubicación más (el código de alarma queda en el log) |
+| Alarma | `0x16`, `0x26`, `0x27`, `0xA4` (la del LL301) | Responde ACK y encola su posición como una ubicación más (el código de alarma queda en el log) |
 | Solicitud de hora | `0x8A` | Responde la hora UTC del servidor |
-| Otros (`0x94` información, `0x15`/`0x21` respuestas a comandos…) | | Quedan en el log y no cierran la conexión |
+| Otros (`0xA2` antenas y WiFi sin GPS, `0x94` información, `0x15`/`0x21` respuestas a comandos…) | | Quedan en el log y no cierran la conexión |
 
 Las tramas cortas (`78 78`, largo de 1 byte) y largas (`79 79`, largo de 2 bytes) se aceptan igual. La fecha de las tramas debe venir en UTC: si una posición en tiempo real difiere más de 10 minutos de la hora del servidor, el log lo advierte (suele ser la zona horaria del equipo, comando `GMT`).
 

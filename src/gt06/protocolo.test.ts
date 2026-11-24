@@ -153,6 +153,31 @@ describe('decodificar', () => {
     expect(requiereAck(protocolo)).toBe(true);
   });
 
+  it('guarda la posición de la alarma 4G 0xA4 (trama real del LL301)', () => {
+    const real = hex(
+      '78782da41a0b180b2908ce0308db980798f45804195f1002da0100000c8200000000002c1b084205041802ff006477c60d0a',
+    );
+    const { tramas, descartadas } = extraerTramas(real);
+    const mensaje = decodificar(tramas[0]);
+
+    expect(descartadas).toBe(0);
+    expect(tramas[0].serie).toBe(100);
+    expect(mensaje).toMatchObject({ tipo: 'ubicacion', alarma: 0x18 });
+    if (mensaje.tipo !== 'ubicacion') return;
+    expect(mensaje.ubicacion.fechaHora.toISOString()).toBe('2026-11-24T11:41:08.000Z');
+    expect(mensaje.ubicacion.latitud).toBeCloseTo(-28.284529, 5);
+    expect(mensaje.ubicacion.longitud).toBeCloseTo(-70.813631, 5);
+    expect(mensaje.ubicacion).toMatchObject({ velocidad: 4, satelites: 14, posicionada: true });
+    expect(requiereAck(0xa4)).toBe(true);
+  });
+
+  it('una 0xA4 sin celda se lee igual, sin código de alarma', () => {
+    const [t] = extraerTramas(trama(0xa4, GPS_LOS_COLORADOS, 4)).tramas;
+    const mensaje = decodificar(t);
+    expect(mensaje.tipo).toBe('ubicacion');
+    expect(mensaje).not.toHaveProperty('alarma');
+  });
+
   it('reconoce la solicitud de hora (0x8A)', () => {
     const [t] = extraerTramas(trama(0x8a, [], 5)).tramas;
     expect(decodificar(t)).toEqual({ tipo: 'hora' });

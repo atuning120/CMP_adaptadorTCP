@@ -17,6 +17,8 @@ export const PROTOCOLO = {
   ALARMA_4G: 0x26,
   ALARMA_4G_EXTENDIDA: 0x27,
   UBICACION_4G: 0xa0,
+  // Alarma de los 4G (la que manda el LL301)
+  ALARMA_4G_MULTICERCO: 0xa4,
   SOLICITUD_HORA: 0x8a,
 } as const;
 
@@ -35,6 +37,8 @@ const NOMBRES: Record<number, string> = {
   0x8a: 'solicitud de hora',
   0x94: 'información del equipo',
   0xa0: 'ubicación 4G',
+  0xa2: 'antenas y WiFi (sin GPS)',
+  0xa4: 'alarma 4G',
 };
 
 export const nombreProtocolo = (protocolo: number) =>
@@ -48,6 +52,7 @@ const CON_ACK = new Set<number>([
   PROTOCOLO.ALARMA,
   PROTOCOLO.ALARMA_4G,
   PROTOCOLO.ALARMA_4G_EXTENDIDA,
+  PROTOCOLO.ALARMA_4G_MULTICERCO,
 ]);
 
 const INICIO_CORTA = 0x78;
@@ -84,7 +89,7 @@ export interface Heartbeat {
 export type Mensaje =
   // zonaHoraria: la que tiene configurada el equipo (comando GMT), p. ej. 'GMT-3:00'; los 4G la mandan en el login
   | { tipo: 'login'; imei: string; zonaHoraria?: string }
-  // alarma: código de alarma de 0x16 y 0x26 (su posición se guarda igual que una ubicación)
+  // alarma: código de alarma de 0x16, 0x26 y 0xA4 (su posición se guarda igual que una ubicación)
   | { tipo: 'ubicacion'; ubicacion: Ubicacion; alarma?: number }
   | Heartbeat
   | { tipo: 'hora' }
@@ -184,8 +189,12 @@ function leerHeartbeat(protocolo: number, c: Buffer): Heartbeat {
 // código de alarma e idioma
 const INDICE_CODIGO_ALARMA = 18 + 9 + 3;
 
+// Alarma 0xA4: GPS (18), celda 4G (el primer byte es su largo, contándose), información del terminal, voltaje, señal
+// GSM, código de alarma, idioma y N° de geocerca
+const indiceCodigoAlarma4g = (c: Buffer) => 18 + c[18] + 3;
+
 /**
- * Bloque GPS común a 0x12, 0x22, 0xA0 y las alarmas 0x16, 0x26 y 0x27 (18 bytes): fecha UTC (6), largo GPS + satélites (1),
+ * Bloque GPS común a 0x12, 0x22, 0xA0 y las alarmas 0x16, 0x26, 0x27 y 0xA4 (18 bytes): fecha UTC (6), largo GPS + satélites (1),
  * latitud (4), longitud (4), velocidad km/h (1) y rumbo con estado (2).
  */
 function leerGps(c: Buffer): Omit<Ubicacion, 'enTiempoReal'> {
@@ -237,13 +246,16 @@ export function decodificar(trama: Trama): Mensaje {
     // Las alarmas traen la posición del momento: se guarda como una ubicación más (en tiempo real)
     case PROTOCOLO.ALARMA:
     case PROTOCOLO.ALARMA_4G:
-    case PROTOCOLO.ALARMA_4G_EXTENDIDA: {
+    case PROTOCOLO.ALARMA_4G_EXTENDIDA:
+    case PROTOCOLO.ALARMA_4G_MULTICERCO: {
       if (contenido.length < 18) return { tipo: 'otro' };
-      const conCodigo = protocolo !== PROTOCOLO.ALARMA_4G_EXTENDIDA && contenido.length > INDICE_CODIGO_ALARMA;
+      const indiceCodigo =
+        protocolo === PROTOCOLO.ALARMA_4G_MULTICERCO && contenido.length > 18 ? indiceCodigoAlarma4g(contenido) : INDICE_CODIGO_ALARMA;
+      const conCodigo = protocolo !== PROTOCOLO.ALARMA_4G_EXTENDIDA && contenido.length > indiceCodigo;
       return {
         tipo: 'ubicacion',
         ubicacion: { ...leerGps(contenido), enTiempoReal: true },
-        ...(conCodigo ? { alarma: contenido[INDICE_CODIGO_ALARMA] } : {}),
+        ...(conCodigo ? { alarma: contenido[indiceCodigo] } : {}),
       };
     }
     case PROTOCOLO.HEARTBEAT:
