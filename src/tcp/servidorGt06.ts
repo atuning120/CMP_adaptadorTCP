@@ -1,6 +1,16 @@
 import net from 'node:net';
 import type { PosicionGps } from '../backend/posicion.js';
-import { ack, decodificar, extraerTramas, nombreProtocolo, requiereAck, respuestaHora } from '../gt06/protocolo.js';
+import {
+  PROTOCOLO,
+  ack,
+  comandoEnLinea,
+  decodificar,
+  extraerTramas,
+  nombreProtocolo,
+  requiereAck,
+  respuestaHora,
+} from '../gt06/protocolo.js';
+import type { Comandos, EnviarComando } from './comandos.js';
 import type { DispositivosVistos } from './dispositivosVistos.js';
 import { DESFASE_SOSPECHOSO_MS, duracion, registraTramas, resumir } from './registroTramas.js';
 import type { ModoLogTramas } from './registroTramas.js';
@@ -17,6 +27,8 @@ export interface OpcionesServidor {
   dispositivos?: DispositivosVistos;
   // Tramas en hex en el log (ver registroTramas.ts)
   logTramas?: ModoLogTramas;
+  // Comandos en línea (0x80) pendientes para los equipos
+  comandos?: Comandos;
   ahora?: () => Date;
 }
 
@@ -29,8 +41,12 @@ export function crearServidorGt06({
   log = console,
   dispositivos,
   logTramas = 'no',
+  comandos,
   ahora = () => new Date(),
 }: OpcionesServidor): net.Server {
+  // Número de serie de los comandos que envía el servidor
+  let serieComandos = 0;
+
   return net.createServer((socket) => {
     // Puede no estar si la conexión se cortó apenas se aceptó
     const origen = socket.remoteAddress ? `${socket.remoteAddress}:${socket.remotePort}` : 'origen desconocido';
@@ -45,9 +61,15 @@ export function crearServidorGt06({
 
     const etiqueta = () => imei ?? `sin login (${origen})`;
     const conLog = () => registraTramas(logTramas, imei);
-    const enviar = (datos: Buffer, protocolo: number, serie: number) => {
+    const enviar = (datos: Buffer, protocolo: number, serie: number, detalle = '') => {
       socket.write(datos);
-      if (conLog()) log.info(`TX ${etiqueta()} ${nombreProtocolo(protocolo)} #${serie} | ${datos.toString('hex')}`);
+      const resumen = detalle ? ` ${detalle}` : '';
+      if (conLog()) log.info(`TX ${etiqueta()} ${nombreProtocolo(protocolo)} #${serie}${resumen} | ${datos.toString('hex')}`);
+    };
+    // Una por conexión: Comandos la usa para saber si la conexión que se cierra es la que tenía registrada
+    const enviarComando: EnviarComando = (texto, bandera) => {
+      serieComandos = (serieComandos + 1) & 0xffff;
+      enviar(comandoEnLinea(texto, bandera, serieComandos), PROTOCOLO.COMANDO, serieComandos, `"${texto}" (comando ${bandera})`);
     };
 
     socket.setTimeout(INACTIVIDAD_MS);
@@ -63,7 +85,10 @@ export function crearServidorGt06({
       log.warn(`Conexión ${origen} (${imei ?? 'sin login'}): ${error.message}`);
     });
     socket.on('close', () => {
-      if (imei) dispositivos?.desconexion(imei);
+      if (imei) {
+        dispositivos?.desconexion(imei);
+        comandos?.cierre(imei, enviarComando);
+      }
       // Las conexiones que nunca mandaron una trama válida son escáneres de internet: no se registran
       if (!conLog() || tramasRecibidas === 0) return;
       const fin = ahora();
@@ -138,9 +163,16 @@ export function crearServidorGt06({
           }
         }
 
+        if (mensaje.tipo === 'respuestaComando' && imei && comandos && !comandos.respuesta(imei, mensaje.bandera, mensaje.texto)) {
+          log.warn(`${etiqueta()}: respuesta a un comando desconocido (${mensaje.bandera}): "${mensaje.texto}"`);
+        }
+
         if (mensaje.tipo === 'hora') enviar(respuestaHora(trama.serie, recibida), trama.protocolo, trama.serie);
         else if (requiereAck(trama.protocolo)) enviar(ack(trama.protocolo, trama.serie), trama.protocolo, trama.serie);
       }
+
+      // El equipo acaba de hablar por esta conexión: si tiene comandos pendientes, salen ahora (después de los ACK)
+      if (imei && tramas.length > 0) comandos?.actividad(imei, enviarComando);
     });
   });
 }

@@ -7,13 +7,14 @@ Gateway between GPS devices and the Backend: a raw TCP server (Node `net`, port 
 - Sources: today the mobile app (Front-mobile `src/services/gt06.ts`) impersonates an LL301 every ~30 s during a shift with virtual IMEI `'9' + id_maquina` padded to 15 digits; later the real Jimi LL301 trackers connect to the same port. Nothing here changes when they arrive.
 - GT06 ACKs: login, heartbeat and alarms get one (`ack()`); locations don't; `0x8A` gets the UTC time (`respuestaHora()`). Alarm packets (`0x16`, `0x26`, `0x27`, `0xA4`) are forwarded as positions; the LL301 uses `0xA0` + `0xA4`, and its alarms jump ahead of queued positions (arrive out of order). Battery comes from the last heartbeat of the connection (`0x23` estimates it from the voltage).
 - Frame log (`src/tcp/registroTramas.ts`, env `LOG_TRAMAS`: `reales` default, `todas`, `no`): RX/TX lines in hex with the IMEI, plus a `Desconexión` line saying who closed the socket (device, 10 min idle timeout, error). Virtual app IMEIs (`9000…`) are skipped in `reales`.
+- Online commands (`0x80`, same text as the SMS, e.g. `MODE,1,30,1,1,1#`): `scripts/comando-gps.sh <imei> 'CMD#'` → `POST /comandos` (`X-Api-Key` = `ADAPTADOR_API_KEY`) → `Comandos` (`src/tcp/comandos.ts`, in memory) sends it on the connection that sent the last frame if it spoke < 1 min ago, else on its next frame; the reply `0x21` is matched by the server flag (= command id). Only commands in `src/gt06/comandosPermitidos.ts` (never `SERVER`/`APN`/`FACTORY`, they can cut the device off; `GMT` only as the `GMT#` query).
 - `src/gt06/codificador.ts` must stay in sync with Front-mobile's `src/services/gt06.ts`. `pnpm simular` drives a fake device for end-to-end tests.
 - Env vars: `BACKEND_URL`, `ADAPTADOR_API_KEY` (required), `PORT`, `TCP_PORT`, `LOG_TRAMAS`.
 
 ## Code
 
 - `/health` always answers 200 while the process lives (`actualizar-vm.sh` rolls back on failure, and a down Backend must not trigger that); its body is the diagnosis: `cola` (`ColaPosiciones.estado()`: queued, sent, discarded, last OK send, last error, retrying) and `dispositivos` (`DispositivosVistos`: last seen per IMEI; the app opens one connection per batch, so "connected now" is useless). HTTP listens only on the VM's 127.0.0.1: read it with `az vm run-command invoke ... --scripts 'curl -s http://127.0.0.1:3001/health'`. No source IPs stored.
-- `src/app.ts`: `createApp()` builds the Express app (`/health`) without listening; `src/main.ts` starts HTTP + TCP; `src/config.ts` reads env vars (`leerConfig()`, only called from main).
+- `src/app.ts`: `createApp()` builds the Express app (`/health`, `/comandos`) without listening; `src/main.ts` starts HTTP + TCP; `src/config.ts` reads env vars (`leerConfig()`, only called from main).
 - `src/gt06/` protocol (framing, CRC, decode, ACK), `src/tcp/` connection handling, `src/backend/` contract + queue.
 - ESM imports need the `.js` extension (`import { x } from './x.js'`).
 - Tests live next to the code as `*.test.ts`.

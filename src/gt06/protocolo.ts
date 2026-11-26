@@ -20,6 +20,10 @@ export const PROTOCOLO = {
   // Alarma de los 4G (la que manda el LL301)
   ALARMA_4G_MULTICERCO: 0xa4,
   SOLICITUD_HORA: 0x8a,
+  // Comando en línea (servidor → equipo, el mismo texto de un SMS) y sus respuestas: 0x21 los 4G, 0x15 los GT06
+  COMANDO: 0x80,
+  RESPUESTA_COMANDO: 0x21,
+  RESPUESTA_COMANDO_GT06: 0x15,
 } as const;
 
 // Nombres para el log (incluye paquetes que el adaptador recibe pero no procesa)
@@ -34,6 +38,7 @@ const NOMBRES: Record<number, string> = {
   0x23: 'heartbeat 4G',
   0x26: 'alarma',
   0x27: 'alarma 4G',
+  0x80: 'comando',
   0x8a: 'solicitud de hora',
   0x94: 'información del equipo',
   0xa0: 'ubicación 4G',
@@ -93,6 +98,8 @@ export type Mensaje =
   | { tipo: 'ubicacion'; ubicacion: Ubicacion; alarma?: number }
   | Heartbeat
   | { tipo: 'hora' }
+  // bandera: la que puso el servidor en el comando 0x80 (el equipo la devuelve tal cual), para saber a cuál responde
+  | { tipo: 'respuestaComando'; bandera: number; texto: string }
   | { tipo: 'otro' };
 
 const esInicio = (b: Buffer, i: number) =>
@@ -227,6 +234,32 @@ function indiceReenvio(protocolo: number, c: Buffer): number | null {
   return null;
 }
 
+/**
+ * Respuesta a un comando 0x80:
+ * - 0x21 (4G, trama larga): bandera del servidor (4), codificación (1: 0x01 ASCII, 0x02 UTF-16 BE) y el texto.
+ * - 0x15 (GT06, trama corta): largo (1: bandera + texto), bandera (4), texto e idioma (2).
+ */
+function leerRespuestaComando(protocolo: number, c: Buffer): Mensaje | null {
+  if (protocolo === PROTOCOLO.RESPUESTA_COMANDO) {
+    if (c.length < 5) return null;
+    const crudo = c.subarray(5);
+    let texto: string;
+    if (c[4] === 0x02 && crudo.length % 2 === 0) {
+      const copia = Buffer.from(crudo);
+      texto = copia.swap16().toString('utf16le');
+    } else {
+      texto = crudo.toString('latin1');
+    }
+    return { tipo: 'respuestaComando', bandera: c.readUInt32BE(0), texto: limpiarTexto(texto) };
+  }
+  if (c.length < 5) return null;
+  const fin = Math.min(1 + c[0], c.length);
+  return { tipo: 'respuestaComando', bandera: c.readUInt32BE(1), texto: limpiarTexto(c.subarray(5, fin).toString('latin1')) };
+}
+
+// Sin los NUL de relleno ni espacios en los extremos
+const limpiarTexto = (texto: string) => texto.replace(/\0+/g, '').trim();
+
 export function decodificar(trama: Trama): Mensaje {
   const { protocolo, contenido } = trama;
   switch (protocolo) {
@@ -263,6 +296,9 @@ export function decodificar(trama: Trama): Mensaje {
       return leerHeartbeat(protocolo, contenido);
     case PROTOCOLO.SOLICITUD_HORA:
       return { tipo: 'hora' };
+    case PROTOCOLO.RESPUESTA_COMANDO:
+    case PROTOCOLO.RESPUESTA_COMANDO_GT06:
+      return leerRespuestaComando(protocolo, contenido) ?? { tipo: 'otro' };
     default:
       return { tipo: 'otro' };
   }
@@ -298,3 +334,20 @@ export const respuestaHora = (serie: number, ahora: Date) =>
     ],
     serie,
   );
+
+// Largo máximo del texto de un comando: la trama corta tiene un solo byte de largo
+export const LARGO_MAXIMO_COMANDO = 200;
+
+/**
+ * Comando en línea 0x80 (servidor → equipo): largo (1: bandera + texto), bandera del servidor (4) y el texto ASCII,
+ * igual al de un SMS (p. ej. 'PARAM#'). El equipo responde con 0x21 devolviendo la misma bandera. Sin los 2 bytes de
+ * idioma, como en el ejemplo del documento del LL301 (es opcional y así lo manda Traccar por defecto).
+ */
+export function comandoEnLinea(texto: string, bandera: number, serie: number): Buffer {
+  const ascii = Buffer.from(texto, 'latin1');
+  if (ascii.length === 0 || ascii.length > LARGO_MAXIMO_COMANDO) {
+    throw new Error(`El comando debe tener entre 1 y ${LARGO_MAXIMO_COMANDO} caracteres`);
+  }
+  const banderaBytes = [(bandera >>> 24) & 0xff, (bandera >>> 16) & 0xff, (bandera >>> 8) & 0xff, bandera & 0xff];
+  return respuesta(PROTOCOLO.COMANDO, [ascii.length + 4, ...banderaBytes, ...ascii], serie);
+}

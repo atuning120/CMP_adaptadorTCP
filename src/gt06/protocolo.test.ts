@@ -1,7 +1,15 @@
 import { describe, expect, it } from 'vitest';
 import { heartbeat, login, trama, ubicacion } from './codificador.js';
 import { crcItu } from './crc.js';
-import { ack, decodificar, extraerTramas, nombreProtocolo, requiereAck, respuestaHora } from './protocolo.js';
+import {
+  ack,
+  comandoEnLinea,
+  decodificar,
+  extraerTramas,
+  nombreProtocolo,
+  requiereAck,
+  respuestaHora,
+} from './protocolo.js';
 
 const hex = (texto: string) => Buffer.from(texto.replace(/\s/g, ''), 'hex');
 
@@ -237,5 +245,52 @@ describe('codificador', () => {
   it('el heartbeat lleva la batería en niveles de 0 a 6', () => {
     const [t] = extraerTramas(heartbeat(100, 4)).tramas;
     expect(decodificar(t)).toMatchObject({ tipo: 'heartbeat', bateria: 100 });
+  });
+});
+
+describe('comandos en línea', () => {
+  it('arma el comando 0x80 igual que el ejemplo del documento del LL301', () => {
+    expect(comandoEnLinea('sos#', 0, 1)).toEqual(hex('78 78 0E 80 08 00 00 00 00 73 6F 73 23 00 01 6D 6A 0D 0A'));
+  });
+
+  it('pone la bandera del servidor para reconocer la respuesta', () => {
+    const [t] = extraerTramas(comandoEnLinea('PARAM#', 0x01020304, 7)).tramas;
+    expect(t.protocolo).toBe(0x80);
+    expect([...t.contenido]).toEqual([10, 1, 2, 3, 4, ...Buffer.from('PARAM#')]);
+  });
+
+  it('rechaza un comando vacío o demasiado largo', () => {
+    expect(() => comandoEnLinea('', 1, 1)).toThrow();
+    expect(() => comandoEnLinea(`${'A'.repeat(200)}#`, 1, 1)).toThrow();
+  });
+
+  it('lee la respuesta 0x21 del ejemplo del documento', () => {
+    const respuesta = hex(`79 79 00 9D 21 00 00 00 00 01 42 61 74 74 65 72 79 3A 34 2E 31 36 56 2C 4E 4F 52 4D 41 4C 3B
+      20 47 50 52 53 3A 4C 69 6E 6B 20 55 70 3B 20 47 53 4D 20 53 69 67 6E 61 6C 20 4C 65 76 65 6C 3A 53 74 72 6F 6E 67
+      3B 20 47 50 53 3A 53 65 61 72 63 68 69 6E 67 20 73 61 74 65 6C 6C 69 74 65 2C 20 53 56 53 20 55 73 65 64 20 69 6E
+      20 66 69 78 3A 30 28 30 29 2C 20 47 50 53 20 53 69 67 6E 61 6C 20 4C 65 76 65 6C 3A 3B 20 41 43 43 3A 4F 46 46 3B
+      20 44 65 66 65 6E 73 65 3A 4F 46 46 00 2E 26 DF 0D 0A`);
+    const { tramas, descartadas } = extraerTramas(respuesta);
+
+    expect(descartadas).toBe(0);
+    expect(decodificar(tramas[0])).toEqual({
+      tipo: 'respuestaComando',
+      bandera: 0,
+      texto:
+        'Battery:4.16V,NORMAL; GPRS:Link Up; GSM Signal Level:Strong; GPS:Searching satellite, SVS Used in fix:0(0), ' +
+        'GPS Signal Level:; ACC:OFF; Defense:OFF',
+    });
+    expect(nombreProtocolo(0x21)).toBe('0x21 respuesta a comando');
+    expect(requiereAck(0x21)).toBe(false);
+  });
+
+  it('lee una respuesta 0x21 en UTF-16 y una 0x15 de los GT06', () => {
+    const utf16 = Buffer.from('MODE OK', 'utf16le').swap16();
+    const [t21] = extraerTramas(trama(0x21, [0, 0, 0, 9, 0x02, ...utf16], 3)).tramas;
+    expect(decodificar(t21)).toEqual({ tipo: 'respuestaComando', bandera: 9, texto: 'MODE OK' });
+
+    const texto = Buffer.from('OK!');
+    const [t15] = extraerTramas(trama(0x15, [texto.length + 4, 0, 0, 0, 5, ...texto, 0x00, 0x02], 4)).tramas;
+    expect(decodificar(t15)).toEqual({ tipo: 'respuestaComando', bandera: 5, texto: 'OK!' });
   });
 });
