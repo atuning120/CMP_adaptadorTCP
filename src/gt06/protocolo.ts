@@ -17,7 +17,32 @@ export const PROTOCOLO = {
   ALARMA_4G: 0x26,
   ALARMA_4G_EXTENDIDA: 0x27,
   UBICACION_4G: 0xa0,
+  // Alarma de los 4G (la que manda el LL301)
+  ALARMA_4G_MULTICERCO: 0xa4,
+  SOLICITUD_HORA: 0x8a,
 } as const;
+
+// Nombres para el log (incluye paquetes que el adaptador recibe pero no procesa)
+const NOMBRES: Record<number, string> = {
+  0x01: 'login',
+  0x12: 'ubicación',
+  0x13: 'heartbeat',
+  0x15: 'respuesta a comando',
+  0x16: 'alarma',
+  0x21: 'respuesta a comando',
+  0x22: 'ubicación',
+  0x23: 'heartbeat 4G',
+  0x26: 'alarma',
+  0x27: 'alarma 4G',
+  0x8a: 'solicitud de hora',
+  0x94: 'información del equipo',
+  0xa0: 'ubicación 4G',
+  0xa2: 'antenas y WiFi (sin GPS)',
+  0xa4: 'alarma 4G',
+};
+
+export const nombreProtocolo = (protocolo: number) =>
+  `0x${protocolo.toString(16).padStart(2, '0')} ${NOMBRES[protocolo] ?? 'desconocido'}`;
 
 // Paquetes que el dispositivo espera ver confirmados; si no recibe el ACK, reintenta o se desconecta
 const CON_ACK = new Set<number>([
@@ -27,6 +52,7 @@ const CON_ACK = new Set<number>([
   PROTOCOLO.ALARMA,
   PROTOCOLO.ALARMA_4G,
   PROTOCOLO.ALARMA_4G_EXTENDIDA,
+  PROTOCOLO.ALARMA_4G_MULTICERCO,
 ]);
 
 const INICIO_CORTA = 0x78;
@@ -52,10 +78,21 @@ export interface Ubicacion {
   enTiempoReal: boolean;
 }
 
+export interface Heartbeat {
+  tipo: 'heartbeat';
+  bateria: number | null; // porcentaje
+  voltaje?: number; // V, solo 0x23
+  senalGsm?: number; // 0 (sin señal) a 4
+  cargando?: boolean;
+}
+
 export type Mensaje =
-  | { tipo: 'login'; imei: string }
-  | { tipo: 'ubicacion'; ubicacion: Ubicacion }
-  | { tipo: 'heartbeat'; bateria: number | null }
+  // zonaHoraria: la que tiene configurada el equipo (comando GMT), p. ej. 'GMT-3:00'; los 4G la mandan en el login
+  | { tipo: 'login'; imei: string; zonaHoraria?: string }
+  // alarma: código de alarma de 0x16, 0x26 y 0xA4 (su posición se guarda igual que una ubicación)
+  | { tipo: 'ubicacion'; ubicacion: Ubicacion; alarma?: number }
+  | Heartbeat
+  | { tipo: 'hora' }
   | { tipo: 'otro' };
 
 const esInicio = (b: Buffer, i: number) =>
@@ -114,7 +151,50 @@ export function extraerTramas(buffer: Buffer): { tramas: Trama[]; resto: Buffer;
 const leerImei = (contenido: Buffer) => contenido.subarray(0, 8).toString('hex').replace(/^0/, '');
 
 /**
- * Bloque GPS común a 0x12, 0x22, 0x16 y 0xA0 (18 bytes): fecha UTC (6), largo GPS + satélites (1),
+ * Login de los equipos 4G: IMEI (8), tipo de equipo (2) y zona horaria con idioma (2). La zona viene en los bits
+ * 15 a 4 como horas × 100 + minutos, y el bit 3 indica oeste.
+ */
+function leerZonaHoraria(contenido: Buffer): string | undefined {
+  if (contenido.length < 12) return undefined;
+  const bits = contenido.readUInt16BE(10);
+  const valor = bits >> 4;
+  const minutos = String(valor % 100).padStart(2, '0');
+  return `GMT${bits & 0x08 ? '-' : '+'}${Math.floor(valor / 100)}:${minutos}`;
+}
+
+// Batería de litio: 3,6 V se toma como vacía y 4,2 V como llena (aproximado, para seguir la descarga)
+const VOLTAJE_VACIA = 3.6;
+const VOLTAJE_LLENA = 4.2;
+const porcentajeDeVoltaje = (voltaje: number) =>
+  Math.round(Math.min(Math.max((voltaje - VOLTAJE_VACIA) / (VOLTAJE_LLENA - VOLTAJE_VACIA), 0), 1) * 100);
+
+/**
+ * Heartbeat 0x13: información del terminal (1), nivel de batería 0 a 6 (1), señal GSM (1), alarma e idioma (2).
+ * Heartbeat 0x23 (4G): información del terminal (1), voltaje en centésimas de V (2), señal GSM (1), idioma (2).
+ * En la información del terminal, el bit 2 indica que está cargando.
+ */
+function leerHeartbeat(protocolo: number, c: Buffer): Heartbeat {
+  const cargando = c.length >= 1 ? Boolean(c[0] & 0x04) : undefined;
+  if (protocolo === PROTOCOLO.HEARTBEAT_4G) {
+    if (c.length < 4) return { tipo: 'heartbeat', bateria: null };
+    const voltaje = c.readUInt16BE(1) / 100;
+    return { tipo: 'heartbeat', bateria: porcentajeDeVoltaje(voltaje), voltaje, senalGsm: c[3], cargando };
+  }
+  const nivel = c[1];
+  const bateria = c.length >= 2 && nivel <= 6 ? Math.round((nivel / 6) * 100) : null;
+  return { tipo: 'heartbeat', bateria, ...(c.length >= 3 ? { senalGsm: c[2] } : {}), ...(cargando !== undefined ? { cargando } : {}) };
+}
+
+// Alarma 0x16 y 0x26: GPS (18), celda (9: largo, MCC, MNC, LAC, Cell ID), información del terminal, voltaje, señal GSM,
+// código de alarma e idioma
+const INDICE_CODIGO_ALARMA = 18 + 9 + 3;
+
+// Alarma 0xA4: GPS (18), celda 4G (el primer byte es su largo, contándose), información del terminal, voltaje, señal
+// GSM, código de alarma, idioma y N° de geocerca
+const indiceCodigoAlarma4g = (c: Buffer) => 18 + c[18] + 3;
+
+/**
+ * Bloque GPS común a 0x12, 0x22, 0xA0 y las alarmas 0x16, 0x26, 0x27 y 0xA4 (18 bytes): fecha UTC (6), largo GPS + satélites (1),
  * latitud (4), longitud (4), velocidad km/h (1) y rumbo con estado (2).
  */
 function leerGps(c: Buffer): Omit<Ubicacion, 'enTiempoReal'> {
@@ -150,8 +230,11 @@ function indiceReenvio(protocolo: number, c: Buffer): number | null {
 export function decodificar(trama: Trama): Mensaje {
   const { protocolo, contenido } = trama;
   switch (protocolo) {
-    case PROTOCOLO.LOGIN:
-      return contenido.length >= 8 ? { tipo: 'login', imei: leerImei(contenido) } : { tipo: 'otro' };
+    case PROTOCOLO.LOGIN: {
+      if (contenido.length < 8) return { tipo: 'otro' };
+      const zonaHoraria = leerZonaHoraria(contenido);
+      return { tipo: 'login', imei: leerImei(contenido), ...(zonaHoraria ? { zonaHoraria } : {}) };
+    }
     case PROTOCOLO.UBICACION:
     case PROTOCOLO.UBICACION_LBS:
     case PROTOCOLO.UBICACION_4G: {
@@ -160,14 +243,26 @@ export function decodificar(trama: Trama): Mensaje {
       const enTiempoReal = indice === null || indice >= contenido.length || contenido[indice] === 0;
       return { tipo: 'ubicacion', ubicacion: { ...leerGps(contenido), enTiempoReal } };
     }
-    case PROTOCOLO.HEARTBEAT: {
-      // Nivel de batería de 0 a 6
-      const nivel = contenido[1];
-      const bateria = contenido.length >= 2 && nivel <= 6 ? Math.round((nivel / 6) * 100) : null;
-      return { tipo: 'heartbeat', bateria };
+    // Las alarmas traen la posición del momento: se guarda como una ubicación más (en tiempo real)
+    case PROTOCOLO.ALARMA:
+    case PROTOCOLO.ALARMA_4G:
+    case PROTOCOLO.ALARMA_4G_EXTENDIDA:
+    case PROTOCOLO.ALARMA_4G_MULTICERCO: {
+      if (contenido.length < 18) return { tipo: 'otro' };
+      const indiceCodigo =
+        protocolo === PROTOCOLO.ALARMA_4G_MULTICERCO && contenido.length > 18 ? indiceCodigoAlarma4g(contenido) : INDICE_CODIGO_ALARMA;
+      const conCodigo = protocolo !== PROTOCOLO.ALARMA_4G_EXTENDIDA && contenido.length > indiceCodigo;
+      return {
+        tipo: 'ubicacion',
+        ubicacion: { ...leerGps(contenido), enTiempoReal: true },
+        ...(conCodigo ? { alarma: contenido[indiceCodigo] } : {}),
+      };
     }
+    case PROTOCOLO.HEARTBEAT:
     case PROTOCOLO.HEARTBEAT_4G:
-      return { tipo: 'heartbeat', bateria: null };
+      return leerHeartbeat(protocolo, contenido);
+    case PROTOCOLO.SOLICITUD_HORA:
+      return { tipo: 'hora' };
     default:
       return { tipo: 'otro' };
   }
@@ -175,9 +270,9 @@ export function decodificar(trama: Trama): Mensaje {
 
 export const requiereAck = (protocolo: number) => CON_ACK.has(protocolo);
 
-// ACK: 78 78 05 | protocolo | serie | CRC | 0D 0A
-export function ack(protocolo: number, serie: number): Buffer {
-  const cuerpo = Buffer.from([0x05, protocolo, (serie >> 8) & 0xff, serie & 0xff]);
+// Respuesta del servidor: 78 78 | largo | protocolo | contenido | serie | CRC | 0D 0A
+function respuesta(protocolo: number, contenido: number[], serie: number): Buffer {
+  const cuerpo = Buffer.from([contenido.length + 5, protocolo, ...contenido, (serie >> 8) & 0xff, serie & 0xff]);
   const crc = crcItu(cuerpo);
   return Buffer.concat([
     Buffer.from([INICIO_CORTA, INICIO_CORTA]),
@@ -185,3 +280,21 @@ export function ack(protocolo: number, serie: number): Buffer {
     Buffer.from([(crc >> 8) & 0xff, crc & 0xff, ...FIN]),
   ]);
 }
+
+// ACK: 78 78 05 | protocolo | serie | CRC | 0D 0A
+export const ack = (protocolo: number, serie: number) => respuesta(protocolo, [], serie);
+
+// Respuesta a 0x8A: la hora UTC del servidor (AA MM DD HH MM SS), para el equipo que aún no tiene hora del GPS
+export const respuestaHora = (serie: number, ahora: Date) =>
+  respuesta(
+    PROTOCOLO.SOLICITUD_HORA,
+    [
+      ahora.getUTCFullYear() - 2000,
+      ahora.getUTCMonth() + 1,
+      ahora.getUTCDate(),
+      ahora.getUTCHours(),
+      ahora.getUTCMinutes(),
+      ahora.getUTCSeconds(),
+    ],
+    serie,
+  );

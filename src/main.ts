@@ -15,8 +15,14 @@ const http = createApp({ cola, dispositivos, inicio: new Date() }).listen(config
   console.log(`Adaptador: HTTP en el puerto ${config.port}`);
 });
 
-const tcp = crearServidorGt06({ alRecibir: (posicion) => cola.encolar(posicion), dispositivos }).listen(config.tcpPort, () => {
-  console.log(`Adaptador: GT06 (TCP) en el puerto ${config.tcpPort}, reenviando a ${config.backendUrl}`);
+const tcp = crearServidorGt06({
+  alRecibir: (posicion) => cola.encolar(posicion),
+  dispositivos,
+  logTramas: config.logTramas,
+}).listen(config.tcpPort, () => {
+  console.log(
+    `Adaptador: GT06 (TCP) en el puerto ${config.tcpPort}, reenviando a ${config.backendUrl} (log de tramas: ${config.logTramas})`,
+  );
 });
 
 // Docker manda SIGTERM al detener el contenedor: se dejan de aceptar conexiones y se intenta vaciar la cola,
