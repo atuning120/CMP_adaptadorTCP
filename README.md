@@ -197,34 +197,55 @@ El puerto 5023 no tiene autenticación, igual que con un GPS real: cualquiera qu
 | `pnpm test:watch` | Ejecuta los tests en modo watch |
 | `pnpm simular` | Simula un dispositivo GT06 (ver arriba) |
 | `./scripts/deploy-azure.sh vN` | Publica la versión en la VM de Azure a mano (el camino normal es el merge a `main`) |
+| `./scripts/comando-gps.sh <imei> ['COMANDO#']` | Manda un comando a un GPS por TCP, sin SMS (sin comando: historial de ese equipo) |
+
+## Comandos a los GPS (sin SMS)
+
+El LL301 acepta por la conexión TCP los mismos comandos que por SMS (paquete GT06 `0x80`), y responde con un `0x21` con el mismo texto que respondería el SMS. Se mandan desde tu PC (con `az login`):
+
+```bash
+./scripts/comando-gps.sh 864032050668829 'PARAM#'             # consultar la configuración
+./scripts/comando-gps.sh 864032050668829 'MODE,1,30,1,1,1#'   # modo temporizado: posición cada 30 s siempre
+./scripts/comando-gps.sh 864032050668829                      # historial de comandos de ese equipo
+```
+
+- Si el equipo habló en el último minuto, el comando sale al tiro; si no, queda en cola hasta su próxima trama (heartbeat cada ~5 min). El script espera la respuesta hasta 60 s: si no llegó, vuelve a correrlo sin comando para ver el estado (`en cola`, `enviado`, `respondido`, `sin respuesta` a los 5 min, `expirado` a las 24 h).
+- Solo se aceptan los comandos de `src/gt06/comandosPermitidos.ts` (`MODE`, `GPSDUP`, `LEVEL`, alarmas y consultas). `SERVER`, `APN` y `FACTORY` quedan fuera porque pueden dejar al equipo sin hablar con el adaptador, y `GMT` solo se acepta como consulta (`GMT#`) porque cambiarla movería la hora de las tramas: esos, por SMS.
+- La cola y el historial viven en memoria: un despliegue o reinicio los pierde.
+- Por debajo es `POST /comandos` (`{ imei, comando, esperarSegundos? }`), `GET /comandos?imei=` y `GET /comandos/:id` en el puerto HTTP de la VM (solo `127.0.0.1`), con el header `X-Api-Key` = `ADAPTADOR_API_KEY`.
 
 ## Endpoints
 
 | Método | Ruta | Descripción |
 |---|---|---|
 | `GET` | `/health` | Estado del servicio y posiciones en cola |
+| `POST` | `/comandos` | Encola un comando para un GPS y espera su respuesta (`X-Api-Key`) |
+| `GET` | `/comandos`, `/comandos/:id` | Historial de comandos y sus respuestas (`X-Api-Key`) |
 | TCP | `:5023` | Dispositivos GT06 (LL301 o la app móvil) |
 
 ## Estructura
 
 ```
 src/
-├── app.ts                    # App Express (/health) sin levantar el servidor (la usan los tests)
+├── app.ts                    # App Express (/health, /comandos) sin levantar el servidor (la usan los tests)
 ├── config.ts                 # Lee las variables de entorno
 ├── main.ts                   # Punto de entrada: levanta el servidor HTTP y el TCP
 ├── gt06/
 │   ├── crc.ts                # CRC-ITU de las tramas
-│   ├── protocolo.ts          # Separa y decodifica tramas, arma los ACK
+│   ├── protocolo.ts          # Separa y decodifica tramas, arma los ACK y los comandos 0x80
+│   ├── comandosPermitidos.ts # Qué comandos se pueden mandar a los GPS
 │   └── codificador.ts        # Arma tramas como un dispositivo (simulador y tests)
 ├── tcp/
 │   ├── servidorGt06.ts       # Servidor TCP: login, heartbeat y ubicaciones por conexión
 │   ├── registroTramas.ts     # Log de tramas en hex (LOG_TRAMAS)
+│   ├── comandos.ts           # Cola de comandos por IMEI y sus respuestas
 │   └── dispositivosVistos.ts # Últimos dispositivos vistos (/health)
 └── backend/
     ├── posicion.ts           # Contrato con el Backend (POST /tracking/posiciones)
     └── colaPosiciones.ts     # Cola en memoria, envío en lotes y reintentos
 scripts/
-└── simular-dispositivo.ts    # pnpm simular
+├── simular-dispositivo.ts    # pnpm simular
+└── comando-gps.sh            # Manda un comando a un GPS (az vm run-command)
 ```
 
 Los tests van junto al código, con el sufijo `*.test.ts`.

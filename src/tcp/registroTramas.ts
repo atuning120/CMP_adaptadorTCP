@@ -61,6 +61,8 @@ export function resumir(mensaje: Mensaje, ahora: Date): string {
       ].join(', ');
     case 'hora':
       return 'pide la hora';
+    case 'respuestaComando':
+      return `respuesta al comando ${mensaje.bandera}: "${mensaje.texto}"`;
     case 'otro':
       return 'no se procesa';
   }

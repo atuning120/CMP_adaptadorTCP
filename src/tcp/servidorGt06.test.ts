@@ -2,8 +2,10 @@ import net from 'node:net';
 import type { AddressInfo } from 'node:net';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import type { PosicionGps } from '../backend/posicion.js';
-import { login, trama } from '../gt06/codificador.js';
+import { heartbeat, login, trama } from '../gt06/codificador.js';
+import { crcItu } from '../gt06/crc.js';
 import { extraerTramas } from '../gt06/protocolo.js';
+import { Comandos } from './comandos.js';
 import { DispositivosVistos } from './dispositivosVistos.js';
 import type { ModoLogTramas } from './registroTramas.js';
 import { crearServidorGt06 } from './servidorGt06.js';
@@ -27,8 +29,13 @@ const ALARMA = (() => {
 const log = { info: vi.fn(), warn: vi.fn() };
 let servidor: net.Server | null = null;
 
-async function levantar(alRecibir: (p: PosicionGps) => void, dispositivos?: DispositivosVistos, logTramas?: ModoLogTramas) {
-  servidor = crearServidorGt06({ alRecibir, log, dispositivos, logTramas });
+async function levantar(
+  alRecibir: (p: PosicionGps) => void,
+  dispositivos?: DispositivosVistos,
+  logTramas?: ModoLogTramas,
+  comandos?: Comandos,
+) {
+  servidor = crearServidorGt06({ alRecibir, log, dispositivos, logTramas, comandos });
   await new Promise<void>((resolve) => servidor!.listen(0, resolve));
   const { port } = servidor.address() as AddressInfo;
   const cliente = net.connect(port);
@@ -153,5 +160,48 @@ describe('servidor GT06', () => {
     await vi.waitFor(() => expect(lineasInfo()).toContainEqual(expect.stringMatching(/^Login 900000000000027/)));
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(lineasInfo().filter((l) => /^(RX|TX|Desconexión)/.test(l))).toEqual([]);
+  });
+
+  it('entrega un comando en cola con la próxima trama del equipo y guarda su respuesta 0x21', async () => {
+    const comandos = new Comandos();
+    const cliente = await levantar(vi.fn(), undefined, 'reales', comandos);
+    const { id } = comandos.encolar(IMEI_REAL, 'MODE#');
+
+    // Login (su ACK) y, apenas habla, el comando 0x80 con la bandera = id del comando
+    cliente.write(login(IMEI_REAL, 1));
+    // ACK del login (10 bytes) + comando de 5 caracteres (20 bytes)
+    const recibido = extraerTramas(await leer(cliente, 10 + 20)).tramas;
+    expect(recibido.map((t) => t.protocolo)).toEqual([0x01, 0x80]);
+    expect([...recibido[1].contenido]).toEqual([4 + 5, 0, 0, 0, id, ...Buffer.from('MODE#')]);
+    expect(comandos.obtener(id)?.estado).toBe('enviado');
+
+    // El equipo responde por la misma conexión (0x21 en trama larga)
+    const texto = Buffer.from('MODE=2,20,180,1,1,1,1');
+    const cuerpo = [0x21, 0, 0, 0, id, 0x01, ...texto, 0x00, 0x09];
+    const largo = cuerpo.length + 2;
+    const conLargo = Uint8Array.from([largo >> 8, largo & 0xff, ...cuerpo]);
+    const crc = crcItu(conLargo);
+    cliente.write(Buffer.from([0x79, 0x79, ...conLargo, crc >> 8, crc & 0xff, 0x0d, 0x0a]));
+
+    await vi.waitFor(() => expect(comandos.obtener(id)).toMatchObject({ estado: 'respondido', respuesta: 'MODE=2,20,180,1,1,1,1' }));
+    expect(lineasInfo()).toContainEqual(expect.stringMatching(new RegExp(`^TX ${IMEI_REAL} 0x80 comando #1 "MODE#" \\(comando ${id}\\) \\| 7878`)));
+    expect(lineasInfo()).toContainEqual(
+      expect.stringMatching(new RegExp(`^RX ${IMEI_REAL} 0x21 respuesta a comando #9 respuesta al comando ${id}: "MODE=2,20,180,1,1,1,1"`)),
+    );
+    cliente.destroy();
+  });
+
+  it('envía al tiro el comando a un equipo que acaba de hablar', async () => {
+    const comandos = new Comandos();
+    const cliente = await levantar(vi.fn(), undefined, 'no', comandos);
+    cliente.write(Buffer.concat([login(IMEI_REAL, 1), heartbeat(80, 2)]));
+    await leer(cliente, 20);
+
+    const llegada = leer(cliente, 10);
+    const { id } = comandos.encolar(IMEI_REAL, 'PARAM#');
+    const [comando] = extraerTramas(await llegada).tramas;
+    expect(comando.protocolo).toBe(0x80);
+    expect(comandos.obtener(id)?.estado).toBe('enviado');
+    cliente.destroy();
   });
 });
